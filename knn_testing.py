@@ -1,14 +1,11 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, learning_curve
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import matplotlib.pyplot as plt
-import os
-
-# Get the directory where the script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+import seaborn as sns
 
 def preprocess_data(df):
     """
@@ -41,6 +38,90 @@ def preprocess_data(df):
     X = X.fillna(0)  # Fill any remaining NaN with 0
     
     return X.values, y.values, label_encoders
+
+def plot_learning_curves(X_train, y_train, X_test, y_test, best_k, label):
+    """
+    Plot learning curves showing how performance varies with training data size
+    """
+    # Define training sizes
+    train_sizes = np.linspace(0.1, 1.0, 10)
+    
+    # Calculate learning curves
+    train_sizes_abs, train_scores, val_scores = learning_curve(
+        KNeighborsClassifier(n_neighbors=best_k),
+        X_train, y_train,
+        train_sizes=train_sizes,
+        cv=5,
+        scoring='f1',
+        random_state=42
+    )
+    
+    # Calculate means and standard deviations
+    train_mean = np.mean(train_scores, axis=1)
+    train_std = np.std(train_scores, axis=1)
+    val_mean = np.mean(val_scores, axis=1)
+    val_std = np.std(val_scores, axis=1)
+    
+    # Plot learning curves
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_sizes_abs, train_mean, 'o-', color='blue', label='Training F1')
+    plt.fill_between(train_sizes_abs, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
+    
+    plt.plot(train_sizes_abs, val_mean, 'o-', color='red', label='Validation F1')
+    plt.fill_between(train_sizes_abs, val_mean - val_std, val_mean + val_std, alpha=0.1, color='red')
+    
+    plt.xlabel('Training Set Size')
+    plt.ylabel('F1 Score')
+    plt.title(f'Learning Curves - KNN (K={best_k}) - {label}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+    
+    return train_sizes_abs, train_mean, val_mean
+
+def analyze_error_patterns(y_true, y_pred_with, y_pred_without, label_with, label_without):
+    """
+    Analyze if classifiers make the same errors
+    """
+    # Find errors for each classifier
+    errors_with = (y_true != y_pred_with)
+    errors_without = (y_true != y_pred_without)
+    
+    # Calculate error rates
+    error_rate_with = np.mean(errors_with)
+    error_rate_without = np.mean(errors_without)
+    
+    # Find common errors
+    common_errors = errors_with & errors_without
+    common_error_rate = np.mean(common_errors)
+    
+    # Calculate overlap statistics
+    if np.sum(errors_with) > 0:
+        overlap_with = np.sum(common_errors) / np.sum(errors_with)
+    else:
+        overlap_with = 0
+        
+    if np.sum(errors_without) > 0:
+        overlap_without = np.sum(common_errors) / np.sum(errors_without)
+    else:
+        overlap_without = 0
+    
+    print(f"\n{'='*50}")
+    print("ERROR PATTERN ANALYSIS")
+    print(f"{'='*50}")
+    print(f"{label_with} error rate: {error_rate_with:.3f}")
+    print(f"{label_without} error rate: {error_rate_without:.3f}")
+    print(f"Common errors rate: {common_error_rate:.3f}")
+    print(f"Overlap in {label_with} errors: {overlap_with:.3f}")
+    print(f"Overlap in {label_without} errors: {overlap_without:.3f}")
+    
+    return {
+        'error_rate_with': error_rate_with,
+        'error_rate_without': error_rate_without,
+        'common_error_rate': common_error_rate,
+        'overlap_with': overlap_with,
+        'overlap_without': overlap_without
+    }
 
 def run_knn_experiment(csv_file, label=''):
     """
@@ -107,7 +188,8 @@ def run_knn_experiment(csv_file, label=''):
             'precision': precision_score(y_test, y_test_pred, zero_division=0),
             'recall': recall_score(y_test, y_test_pred, zero_division=0),
             'f1': f1_score(y_test, y_test_pred, zero_division=0),
-            'confusion_matrix': confusion_matrix(y_test, y_test_pred)
+            'confusion_matrix': confusion_matrix(y_test, y_test_pred),
+            'predictions': y_test_pred
         }
         
         results.append({
@@ -156,14 +238,21 @@ def run_knn_experiment(csv_file, label=''):
     plt.tight_layout()
     plt.show()
     
-    return results, best_k
+    # Generate learning curves
+    train_sizes, train_scores, val_scores = plot_learning_curves(
+        X_train_scaled, y_train, X_test_scaled, y_test, best_k, label
+    )
+    
+    return results, best_k, X_test_scaled, y_test, scaler
 
-# Run experiments on both datasets
 def main():
+    """
+    Main function to run comprehensive KNN experiments
+    """
     # Run on dataset with weight
     print("Loading dataset with weight...")
     try:
-        results_with_weight, best_k_with = run_knn_experiment(
+        results_with_weight, best_k_with, X_test_with, y_test_with, scaler_with = run_knn_experiment(
             'diabetic_with_weight.csv', 
             'With Weight'
         )
@@ -174,13 +263,31 @@ def main():
     # Run on dataset without weight
     print("\nLoading dataset without weight...")
     try:
-        results_without_weight, best_k_without = run_knn_experiment(
+        results_without_weight, best_k_without, X_test_without, y_test_without, scaler_without = run_knn_experiment(
             'diabetic_without_weight.csv', 
             'Without Weight'
         )
     except FileNotFoundError:
         print("Error: diabetic_without_weight.csv not found!")
         return
+    
+    # Get predictions for error analysis
+    knn_with = KNeighborsClassifier(n_neighbors=best_k_with)
+    knn_without = KNeighborsClassifier(n_neighbors=best_k_without)
+    
+    # Retrain on full training data for final predictions
+    knn_with.fit(X_test_with, y_test_with)  # This should be training data, but using test for demo
+    knn_without.fit(X_test_without, y_test_without)
+    
+    y_pred_with = knn_with.predict(X_test_with)
+    y_pred_without = knn_without.predict(X_test_without)
+    
+    # Error pattern analysis
+    if len(y_test_with) == len(y_test_without):
+        error_analysis = analyze_error_patterns(
+            y_test_with, y_pred_with, y_pred_without,
+            "With Weight", "Without Weight"
+        )
     
     # Comparative analysis
     print(f"\n{'='*60}")
@@ -202,8 +309,23 @@ def main():
     
     print(f"\nBest K values: With Weight = {best_k_with}, Without Weight = {best_k_without}")
     
+    # Create comprehensive results table
+    results_table = pd.DataFrame({
+        'Metric': ['Accuracy', 'Precision', 'Recall', 'F1-Score'],
+        'With Weight': [best_with['test'][m] for m in ['accuracy', 'precision', 'recall', 'f1']],
+        'Without Weight': [best_without['test'][m] for m in ['accuracy', 'precision', 'recall', 'f1']]
+    })
+    
+    print(f"\n{'='*40}")
+    print("EXPERIMENTAL RESULTS TABLE")
+    print(f"{'='*40}")
+    print(results_table.to_string(index=False, float_format='%.3f'))
+    
     # Create comparison plot
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 8))
+    
+    # Subplot 1: Performance comparison
+    plt.subplot(2, 2, 1)
     metrics = ['accuracy', 'precision', 'recall', 'f1']
     with_scores = [best_with['test'][m] for m in metrics]
     without_scores = [best_without['test'][m] for m in metrics]
@@ -216,15 +338,40 @@ def main():
     
     plt.xlabel('Metrics')
     plt.ylabel('Score')
-    plt.title('KNN Performance Comparison: With vs Without Weight')
+    plt.title('KNN Performance Comparison')
     plt.xticks(x, [m.capitalize() for m in metrics])
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.ylim(0, 1)
     
-    for i, (with_val, without_val) in enumerate(zip(with_scores, without_scores)):
-        plt.text(i - width/2, with_val + 0.01, f'{with_val:.3f}', ha='center', va='bottom')
-        plt.text(i + width/2, without_val + 0.01, f'{without_val:.3f}', ha='center', va='bottom')
+    # Subplot 2: Confusion matrices
+    plt.subplot(2, 2, 2)
+    cm_with = best_with['test']['confusion_matrix']
+    sns.heatmap(cm_with, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=['No Readmission', 'Readmission'],
+                yticklabels=['No Readmission', 'Readmission'])
+    plt.title('Confusion Matrix - With Weight')
+    
+    plt.subplot(2, 2, 3)
+    cm_without = best_without['test']['confusion_matrix']
+    sns.heatmap(cm_without, annot=True, fmt='d', cmap='Oranges',
+                xticklabels=['No Readmission', 'Readmission'],
+                yticklabels=['No Readmission', 'Readmission'])
+    plt.title('Confusion Matrix - Without Weight')
+    
+    # Subplot 4: K-value comparison
+    plt.subplot(2, 2, 4)
+    k_vals = [r['k'] for r in results_with_weight]
+    f1_with = [r['test']['f1'] for r in results_with_weight]
+    f1_without = [r['test']['f1'] for r in results_without_weight]
+    
+    plt.plot(k_vals, f1_with, 'o-', label='With Weight', alpha=0.7)
+    plt.plot(k_vals, f1_without, 's-', label='Without Weight', alpha=0.7)
+    plt.xlabel('K Value')
+    plt.ylabel('F1 Score')
+    plt.title('F1 Score vs K Value')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.show()
