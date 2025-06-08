@@ -8,36 +8,24 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def preprocess_data(df):
-    """
-    Preprocess the data by handling categorical variables and creating target
-    """
-    # Create a copy to avoid modifying original
     df = df.copy()
-    
-    # Create binary target variable
     df['early_readmission'] = df['readmitted'].apply(lambda x: 1 if x == '<30' else 0)
     df = df.drop(columns=['readmitted'])
-    
-    # Separate features and target
+
     X = df.drop(columns=['early_readmission'])
     y = df['early_readmission']
     
-    # Handle categorical variables with Label Encoding
     categorical_columns = X.select_dtypes(include=['object']).columns
-    
-    # Create label encoders for categorical columns
     label_encoders = {}
     for col in categorical_columns:
         le = LabelEncoder()
-        # Handle missing values by treating them as a separate category
         X[col] = X[col].fillna('Missing')
         X[col] = le.fit_transform(X[col])
         label_encoders[col] = le
-    
-    # Convert to numpy array and handle any remaining missing values
-    X = X.fillna(0)  # Fill any remaining NaN with 0
-    
-    return X.values, y.values, label_encoders
+
+    X = X.fillna(0)
+    return X, y, label_encoders  # Note: return as Pandas DF/Series
+
 
 def plot_learning_curves(X_train, y_train, X_test, y_test, best_k, label):
     """
@@ -62,13 +50,21 @@ def plot_learning_curves(X_train, y_train, X_test, y_test, best_k, label):
     val_mean = np.mean(val_scores, axis=1)
     val_std = np.std(val_scores, axis=1)
     
+    # Calculate test scores for each training size
+    test_scores = []
+    for size in train_sizes_abs:
+        # Train on subset of training data
+        knn = KNeighborsClassifier(n_neighbors=best_k)
+        knn.fit(X_train[:int(size)], y_train[:int(size)])
+        # Predict on test set
+        y_test_pred = knn.predict(X_test)
+        test_scores.append(f1_score(y_test, y_test_pred))
+    
     # Plot learning curves
     plt.figure(figsize=(10, 6))
     plt.plot(train_sizes_abs, train_mean, 'o-', color='blue', label='Training F1')
-    plt.fill_between(train_sizes_abs, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
-    
     plt.plot(train_sizes_abs, val_mean, 'o-', color='red', label='Validation F1')
-    plt.fill_between(train_sizes_abs, val_mean - val_std, val_mean + val_std, alpha=0.1, color='red')
+    plt.plot(train_sizes_abs, test_scores, 'o-', color='green', label='Test F1')
     
     plt.xlabel('Training Set Size')
     plt.ylabel('F1 Score')
@@ -161,19 +157,34 @@ def run_knn_experiment(csv_file, label=''):
     print(f"Validation set size: {X_val_scaled.shape}")
     print(f"Test set size: {X_test_scaled.shape}")
     
-    # Test different K values
-    k_values = [1, 3, 5, 7, 9, 11, 13, 15]
+    # Test different K values - start from 3 to avoid K=1
+    k_values = [3, 5, 7, 9, 11, 13, 15, 17, 19]
     results = []
     
     print(f"\nTesting K values: {k_values}")
     
     for k in k_values:
-        # Train KNN
-        knn = KNeighborsClassifier(n_neighbors=k)
+        # Train KNN with distance weighting to reduce impact of outliers
+        knn = KNeighborsClassifier(
+            n_neighbors=k,
+            weights='distance',  # Use distance weighting
+            metric='euclidean'
+        )
         knn.fit(X_train_scaled, y_train)
         
-        # Validate
+        # Get predictions for all sets
+        y_train_pred = knn.predict(X_train_scaled)
         y_val_pred = knn.predict(X_val_scaled)
+        y_test_pred = knn.predict(X_test_scaled)
+        
+        # Calculate metrics for all sets
+        train_metrics = {
+            'accuracy': accuracy_score(y_train, y_train_pred),
+            'precision': precision_score(y_train, y_train_pred, zero_division=0),
+            'recall': recall_score(y_train, y_train_pred, zero_division=0),
+            'f1': f1_score(y_train, y_train_pred, zero_division=0)
+        }
+        
         val_metrics = {
             'accuracy': accuracy_score(y_val, y_val_pred),
             'precision': precision_score(y_val, y_val_pred, zero_division=0),
@@ -181,8 +192,6 @@ def run_knn_experiment(csv_file, label=''):
             'f1': f1_score(y_val, y_val_pred, zero_division=0)
         }
         
-        # Test
-        y_test_pred = knn.predict(X_test_scaled)
         test_metrics = {
             'accuracy': accuracy_score(y_test, y_test_pred),
             'precision': precision_score(y_test, y_test_pred, zero_division=0),
@@ -194,11 +203,12 @@ def run_knn_experiment(csv_file, label=''):
         
         results.append({
             'k': k,
+            'train': train_metrics,
             'validation': val_metrics,
             'test': test_metrics
         })
         
-        print(f"K={k}: Val F1={val_metrics['f1']:.3f}, Test F1={test_metrics['f1']:.3f}")
+        print(f"K={k}: Train F1={train_metrics['f1']:.3f}, Val F1={val_metrics['f1']:.3f}, Test F1={test_metrics['f1']:.3f}")
     
     # Find best K based on validation F1 score
     best_k = max(results, key=lambda x: x['validation']['f1'])['k']
@@ -210,9 +220,10 @@ def run_knn_experiment(csv_file, label=''):
     # Print detailed results for best K
     print(f"\nDetailed Results for K={best_k}:")
     for metric in ['accuracy', 'precision', 'recall', 'f1']:
+        train_score = best_result['train'][metric]
         val_score = best_result['validation'][metric]
         test_score = best_result['test'][metric]
-        print(f"{metric.capitalize():>10}: Val={val_score:.3f}, Test={test_score:.3f}")
+        print(f"{metric.capitalize():>10}: Train={train_score:.3f}, Val={val_score:.3f}, Test={test_score:.3f}")
     
     print(f"\nConfusion Matrix (Test Set):")
     print(best_result['test']['confusion_matrix'])
@@ -224,11 +235,13 @@ def run_knn_experiment(csv_file, label=''):
     metrics = ['accuracy', 'precision', 'recall', 'f1']
     for i, metric in enumerate(metrics):
         plt.subplot(2, 2, i+1)
+        train_scores = [r['train'][metric] for r in results]
         val_scores = [r['validation'][metric] for r in results]
         test_scores = [r['test'][metric] for r in results]
         
-        plt.plot(k_values, val_scores, 'o-', label='Validation', alpha=0.7)
-        plt.plot(k_values, test_scores, 's-', label='Test', alpha=0.7)
+        plt.plot(k_values, train_scores, 'o-', label='Training', alpha=0.7)
+        plt.plot(k_values, val_scores, 's-', label='Validation', alpha=0.7)
+        plt.plot(k_values, test_scores, '^-', label='Test', alpha=0.7)
         plt.xlabel('K Value')
         plt.ylabel(metric.capitalize())
         plt.title(f'{metric.capitalize()} vs K ({label})')
@@ -344,22 +357,7 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.ylim(0, 1)
     
-    # Subplot 2: Confusion matrices
-    plt.subplot(2, 2, 2)
-    cm_with = best_with['test']['confusion_matrix']
-    sns.heatmap(cm_with, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=['No Readmission', 'Readmission'],
-                yticklabels=['No Readmission', 'Readmission'])
-    plt.title('Confusion Matrix - With Weight')
-    
-    plt.subplot(2, 2, 3)
-    cm_without = best_without['test']['confusion_matrix']
-    sns.heatmap(cm_without, annot=True, fmt='d', cmap='Oranges',
-                xticklabels=['No Readmission', 'Readmission'],
-                yticklabels=['No Readmission', 'Readmission'])
-    plt.title('Confusion Matrix - Without Weight')
-    
-    # Subplot 4: K-value comparison
+    # Subplot 2: K-value comparison
     plt.subplot(2, 2, 4)
     k_vals = [r['k'] for r in results_with_weight]
     f1_with = [r['test']['f1'] for r in results_with_weight]
